@@ -1,0 +1,28 @@
+services:
+  backend:
+    build: ./backend
+    container_name: leaseflow-backend
+    ports:
+      - "3006:3001"
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app
+      - /app/node_modules
+    environment:
+      - PORT=3001
+      - DB_PATH=/app/data/database.sqlite
+    restart: always
+
+  frontend:
+    build: ./frontend
+    container_name: leaseflow-frontend
+    ports:
+      - "3005:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    depends_on:
+      - backend
+    restart: always
