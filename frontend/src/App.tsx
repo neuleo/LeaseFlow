@@ -23,6 +23,12 @@ interface Settings {
   durationMonths: number;
   annualKm: number;
   allowanceKm: number;
+  excessRate1: number;
+  excessRate2: number;
+  excessThreshold: number;
+  underRate1: number;
+  underRate2: number;
+  underThreshold: number;
 }
 
 interface MileageLog {
@@ -36,7 +42,13 @@ const App = () => {
     startDate: format(new Date(), 'yyyy-MM-dd'),
     durationMonths: 36,
     annualKm: 10000,
-    allowanceKm: 2500
+    allowanceKm: 2500,
+    excessRate1: 0.0566,
+    excessRate2: 0.0792,
+    excessThreshold: 37501,
+    underRate1: 0.0340,
+    underRate2: 0.0204,
+    underThreshold: 22500
   });
   const [logs, setLogs] = useState<MileageLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +79,12 @@ const App = () => {
           durationMonths: parseInt(settingsRes.data.durationMonths) || 36,
           annualKm: parseInt(settingsRes.data.annualKm) || 10000,
           allowanceKm: parseInt(settingsRes.data.allowanceKm) || 2500,
+          excessRate1: parseFloat(settingsRes.data.excessRate1) || 0.0566,
+          excessRate2: parseFloat(settingsRes.data.excessRate2) || 0.0792,
+          excessThreshold: parseInt(settingsRes.data.excessThreshold) || 37501,
+          underRate1: parseFloat(settingsRes.data.underRate1) || 0.0340,
+          underRate2: parseFloat(settingsRes.data.underRate2) || 0.0204,
+          underThreshold: parseInt(settingsRes.data.underThreshold) || 22500,
         });
       }
       setLogs(logsRes.data);
@@ -77,6 +95,41 @@ const App = () => {
     }
   };
 
+  const calculateFinancials = (totalKm: number, agreedKm: number, allowanceKm: number) => {
+    const diff = totalKm - agreedKm;
+    if (Math.abs(diff) <= allowanceKm) return 0;
+
+    if (diff > 0) {
+      const payable = diff - allowanceKm;
+      const totalWithPayable = agreedKm + allowanceKm + payable;
+      
+      let cost = 0;
+      if (totalWithPayable <= settings.excessThreshold) {
+        cost = payable * settings.excessRate1;
+      } else {
+        const tier1Limit = settings.excessThreshold;
+        const tier1Payable = Math.max(0, tier1Limit - (agreedKm + allowanceKm));
+        const tier2Payable = totalWithPayable - tier1Limit;
+        cost = (tier1Payable * settings.excessRate1) + (tier2Payable * settings.excessRate2);
+      }
+      return -cost;
+    } else {
+      const refundable = Math.abs(diff) - allowanceKm;
+      const totalWithRefundable = agreedKm - allowanceKm - refundable;
+      
+      let refund = 0;
+      if (totalWithRefundable >= settings.underThreshold) {
+        refund = refundable * settings.underRate1;
+      } else {
+        const tier1Limit = settings.underThreshold;
+        const tier1Refundable = Math.max(0, (agreedKm - allowanceKm) - tier1Limit);
+        const tier2Refundable = tier1Limit - totalWithRefundable;
+        refund = (tier1Refundable * settings.underRate1) + (tier2Refundable * settings.underRate2);
+      }
+      return refund;
+    }
+  };
+
   const metrics = useMemo(() => {
     const start = parseISO(settings.startDate);
     const end = addDays(start, (settings.durationMonths / 12) * 365.25);
@@ -84,12 +137,33 @@ const App = () => {
     const daysPassed = Math.max(0, Math.min(totalDays, differenceInDays(new Date(), start)));
     
     const currentAllowance = useAllowance ? settings.allowanceKm : 0;
-    const totalBudget = (settings.annualKm * (settings.durationMonths / 12)) + currentAllowance;
+    const totalAgreedKm = settings.annualKm * (settings.durationMonths / 12);
+    const totalBudget = totalAgreedKm + currentAllowance;
     const targetKm = (daysPassed / totalDays) * totalBudget;
     
     const lastLog = logs.length > 0 ? logs[logs.length - 1] : { km: 0, date: settings.startDate };
     const diff = lastLog.km - targetKm;
     const status = diff > 0 ? 'exceeded' : 'on-track';
+
+    // Projection
+    const projectionFactor = daysPassed > 0 ? totalDays / daysPassed : 0;
+    const projectedFinalKm = lastLog.km * projectionFactor;
+    
+    // Financials
+    const currentBalance = calculateFinancials(lastLog.km, totalAgreedKm, settings.allowanceKm);
+    const projectedBalance = calculateFinancials(projectedFinalKm, totalAgreedKm, settings.allowanceKm);
+
+    // Current Over-Target Cost (requested by user)
+    // The user wants to see the cost of the CURRENT overage.
+    // We prorate the allowance as well to see the cost "right now".
+    const proratedAllowance = (daysPassed / totalDays) * settings.allowanceKm;
+    const currentExcessKm = Math.max(0, lastLog.km - (targetKm + proratedAllowance));
+    
+    let currentExcessCost = 0;
+    if (currentExcessKm > 0) {
+        // Simple linear calculation for the current snapshot
+        currentExcessCost = currentExcessKm * settings.excessRate1;
+    }
 
     // Weekly/Monthly Quotas
     const dailyTarget = totalBudget / totalDays;
@@ -103,22 +177,14 @@ const App = () => {
         const periodStart = addDays(now, -days);
         const contractStart = parseISO(settings.startDate);
         
-        // 1. Find the earliest baseline in this period
-        // Is there a log within the period?
         const logsInPeriod = sortedLogs.filter(l => !isBefore(parseISO(l.date), periodStart));
         
         let startKm = 0;
         if (isAfter(contractStart, periodStart)) {
-            // Case A: Contract started WITHIN the period. 
-            // Baseline is 0 km at contract start.
             startKm = 0;
         } else if (logsInPeriod.length > 0) {
-            // Case B: Contract started before the period, and we have logs in the period.
-            // Baseline is the first log of the period.
             startKm = logsInPeriod[0].km;
         } else {
-            // Case C: Contract started before the period, and no logs exist in the period.
-            // We can't determine consumption, so 0.
             return 0;
         }
         
@@ -133,6 +199,10 @@ const App = () => {
       daysPassed,
       totalDays,
       progress: (daysPassed / totalDays) * 100,
+      projectedFinalKm,
+      currentBalance,
+      projectedBalance,
+      currentExcessCost,
       quotas: {
         week: { target: dailyTarget * 7, actual: getActualForPeriod(7) },
         month: { target: dailyTarget * 30.44, actual: getActualForPeriod(30) },
@@ -261,6 +331,48 @@ const App = () => {
                   />
                 </div>
               </div>
+            </div>
+
+            {/* Financial Projection */}
+            <div className="bg-gray-900 p-6 rounded-2xl border border-gray-800 space-y-4">
+              <div className="flex items-center gap-2 mb-2">
+                <TrendingUp className="text-blue-500" />
+                <h3 className="text-sm font-medium text-gray-400">Financial Projection</h3>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-gray-950/50 p-4 rounded-xl border border-gray-800/50">
+                  <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Projected End Odometer</p>
+                  <p className="text-xl font-bold">{Math.round(metrics.projectedFinalKm).toLocaleString()} km</p>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Based on current driving habits
+                  </p>
+                </div>
+                
+                <div className={`p-4 rounded-xl border ${metrics.projectedBalance < 0 ? 'bg-red-900/10 border-red-800/30' : 'bg-green-900/10 border-green-800/30'}`}>
+                  <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Projected Final Balance</p>
+                  <p className={`text-xl font-bold ${metrics.projectedBalance < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {metrics.projectedBalance < 0 ? '-' : '+'}{Math.abs(metrics.projectedBalance).toFixed(2)} €
+                  </p>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    {metrics.projectedBalance < 0 ? `Cost after ${settings.allowanceKm}km allowance` : `Refund after ${settings.allowanceKm}km allowance`}
+                  </p>
+                </div>
+              </div>
+
+              {metrics.diff > 0 && (
+                <div className="bg-gray-800/30 p-4 rounded-xl border border-gray-700/50">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs text-gray-400">Current Overage Cost</span>
+                    <span className={`text-sm font-bold ${metrics.currentExcessCost > 0 ? 'text-red-400' : 'text-gray-100'}`}>
+                      {metrics.currentExcessCost > 0 ? '-' : ''}{metrics.currentExcessCost.toFixed(2)} €
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-500">
+                    Cost of exceeding prorated target + prorated allowance ({Math.round(metrics.targetKm + (metrics.daysPassed / metrics.totalDays) * settings.allowanceKm)}km)
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Quota breakdown */}
@@ -408,6 +520,72 @@ const SettingsForm = ({ initialSettings, onSave, onCancel }: { initialSettings: 
             type="number" 
             value={formData.allowanceKm}
             onChange={e => setFormData({...formData, allowanceKm: parseInt(e.target.value)})}
+            className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500 uppercase font-bold">Excess Rate 1 (€/km)</label>
+            <input 
+              type="number" 
+              step="0.0001"
+              value={formData.excessRate1}
+              onChange={e => setFormData({...formData, excessRate1: parseFloat(e.target.value)})}
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500 uppercase font-bold">Excess Rate 2 (€/km)</label>
+            <input 
+              type="number" 
+              step="0.0001"
+              value={formData.excessRate2}
+              onChange={e => setFormData({...formData, excessRate2: parseFloat(e.target.value)})}
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-gray-500 uppercase font-bold">Excess Threshold (Total km)</label>
+          <input 
+            type="number" 
+            value={formData.excessThreshold}
+            onChange={e => setFormData({...formData, excessThreshold: parseInt(e.target.value)})}
+            className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500 uppercase font-bold">Under Rate 1 (€/km)</label>
+            <input 
+              type="number" 
+              step="0.0001"
+              value={formData.underRate1}
+              onChange={e => setFormData({...formData, underRate1: parseFloat(e.target.value)})}
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500 uppercase font-bold">Under Rate 2 (€/km)</label>
+            <input 
+              type="number" 
+              step="0.0001"
+              value={formData.underRate2}
+              onChange={e => setFormData({...formData, underRate2: parseFloat(e.target.value)})}
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-gray-500 uppercase font-bold">Under Threshold (Total km)</label>
+          <input 
+            type="number" 
+            value={formData.underThreshold}
+            onChange={e => setFormData({...formData, underThreshold: parseInt(e.target.value)})}
             className="w-full bg-gray-800 border border-gray-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
