@@ -14,7 +14,7 @@ import {
   ChevronLeft,
   AlertCircle
 } from 'lucide-react';
-import { format, differenceInDays, addDays, parseISO, isAfter, isBefore, startOfDay } from 'date-fns';
+import { format, differenceInDays, addDays, subDays, subMonths, subYears, parseISO, isAfter, isBefore, startOfDay } from 'date-fns';
 
 const API_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:3006`;
 
@@ -36,8 +36,11 @@ interface MileageLog {
   km: number;
 }
 
+type ChartRange = 'all' | 'year' | '6months' | '3months' | 'month' | 'week';
+
 const App = () => {
   const [view, setView] = useState<'dashboard' | 'settings' | 'log'>('dashboard');
+  const [chartRange, setChartRange] = useState<ChartRange>('all');
   const [settings, setSettings] = useState<Settings>({
     startDate: format(new Date(), 'yyyy-MM-dd'),
     durationMonths: 36,
@@ -216,12 +219,30 @@ const App = () => {
     
     const start = parseISO(settings.startDate);
     const currentAllowance = useAllowance ? settings.allowanceKm : 0;
-    const totalBudget = (settings.annualKm * (settings.durationMonths / 12)) + currentAllowance;
+    const totalAgreedKm = settings.annualKm * (settings.durationMonths / 12);
+    const totalBudget = totalAgreedKm + currentAllowance;
     const end = addDays(start, (settings.durationMonths / 12) * 365.25);
     const totalDays = differenceInDays(end, start);
 
+    // Filter logs based on range
+    let filteredLogs = [...logs].sort((a, b) => parseISO(a.date).getTime() - parseISO(b.date).getTime());
+    const now = new Date();
+    
+    if (chartRange !== 'all') {
+      let rangeStart: Date;
+      switch (chartRange) {
+        case 'week': rangeStart = subDays(now, 7); break;
+        case 'month': rangeStart = subMonths(now, 1); break;
+        case '3months': rangeStart = subMonths(now, 3); break;
+        case '6months': rangeStart = subMonths(now, 6); break;
+        case 'year': rangeStart = subYears(now, 1); break;
+        default: rangeStart = start;
+      }
+      filteredLogs = filteredLogs.filter(log => !isBefore(parseISO(log.date), rangeStart));
+    }
+
     // Linear target line
-    const data = logs.map(log => {
+    const data = filteredLogs.map(log => {
       const days = differenceInDays(parseISO(log.date), start);
       const target = (days / totalDays) * totalBudget;
       return {
@@ -232,7 +253,7 @@ const App = () => {
     });
 
     return data;
-  }, [settings, logs, useAllowance]);
+  }, [settings, logs, useAllowance, chartRange]);
 
   const updateSettings = async (newSettings: Settings) => {
     try {
@@ -383,21 +404,33 @@ const App = () => {
             </div>
 
             {/* Chart */}
-            <div className="bg-gray-900 p-6 rounded-2xl border border-gray-800 h-[300px]">
-              <h3 className="text-sm font-medium mb-4 text-gray-400">Mileage Projection</h3>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
-                  <XAxis dataKey="date" stroke="#9ca3af" fontSize={12} tickLine={false} axisLine={false} />
-                  <YAxis stroke="#9ca3af" fontSize={12} tickLine={false} axisLine={false} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }}
-                  />
-                  <Legend verticalAlign="top" align="right" />
-                  <Line type="monotone" dataKey="target" stroke="#3b82f6" strokeWidth={2} dot={false} name="Target" />
-                  <Line type="monotone" dataKey="actual" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} name="Actual" />
-                </LineChart>
-              </ResponsiveContainer>
+            <div className="bg-gray-900 p-6 rounded-2xl border border-gray-800">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                <h3 className="text-sm font-medium text-gray-400">Mileage Projection</h3>
+                <div className="flex flex-wrap gap-1 bg-gray-950 p-1 rounded-xl border border-gray-800">
+                  <RangeButton active={chartRange === 'all'} onClick={() => setChartRange('all')} label="All" />
+                  <RangeButton active={chartRange === 'year'} onClick={() => setChartRange('year')} label="1Y" />
+                  <RangeButton active={chartRange === '6months'} onClick={() => setChartRange('6months')} label="6M" />
+                  <RangeButton active={chartRange === '3months'} onClick={() => setChartRange('3months')} label="3M" />
+                  <RangeButton active={chartRange === 'month'} onClick={() => setChartRange('month')} label="1M" />
+                  <RangeButton active={chartRange === 'week'} onClick={() => setChartRange('week')} label="1W" />
+                </div>
+              </div>
+              <div className="h-[300px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
+                    <XAxis dataKey="date" stroke="#9ca3af" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#9ca3af" fontSize={12} tickLine={false} axisLine={false} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }}
+                    />
+                    <Legend verticalAlign="top" align="right" />
+                    <Line type="monotone" dataKey="target" stroke="#3b82f6" strokeWidth={2} dot={false} name="Target" />
+                    <Line type="monotone" dataKey="actual" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} name="Actual" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
 
             {/* Quick Actions */}
@@ -445,6 +478,15 @@ const NavButton = ({ active, onClick, icon, label }: { active: boolean, onClick:
   >
     {icon}
     <span className="text-[10px] font-medium uppercase tracking-wider">{label}</span>
+  </button>
+);
+
+const RangeButton = ({ active, onClick, label }: { active: boolean, onClick: () => void, label: string }) => (
+  <button 
+    onClick={onClick}
+    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${active ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-900'}`}
+  >
+    {label}
   </button>
 );
 

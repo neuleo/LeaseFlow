@@ -40,3 +40,6 @@ desktop.ini
 
 # Docker
 .docker/
+
+# Project management
+bug_and_features.md
