@@ -36,7 +36,7 @@ interface MileageLog {
   km: number;
 }
 
-type ChartRange = 'all' | 'year' | '6months' | '3months' | 'month' | 'week';
+type ChartRange = 'all' | 'year' | '6months' | '3months' | 'month' | 'week' | 'day';
 
 const App = () => {
   const [view, setView] = useState<'dashboard' | 'settings' | 'log'>('dashboard');
@@ -177,18 +177,22 @@ const App = () => {
         const sortedLogs = [...logs].sort((a, b) => parseISO(a.date).getTime() - parseISO(b.date).getTime());
         const lastLog = sortedLogs[sortedLogs.length - 1];
         const now = new Date();
-        const periodStart = addDays(now, -days);
+        const periodStart = days === 1 ? startOfDay(now) : subDays(now, days);
         const contractStart = parseISO(settings.startDate);
         
-        const logsInPeriod = sortedLogs.filter(l => !isBefore(parseISO(l.date), periodStart));
+        // Find logs before the period to get a baseline
+        const logsBeforePeriod = sortedLogs.filter(l => isBefore(parseISO(l.date), periodStart));
         
         let startKm = 0;
         if (isAfter(contractStart, periodStart)) {
+            // Contract started within period
             startKm = 0;
-        } else if (logsInPeriod.length > 0) {
-            startKm = logsInPeriod[0].km;
-        } else {
-            return 0;
+        } else if (logsBeforePeriod.length > 0) {
+            // Baseline is the last log BEFORE the period started
+            startKm = logsBeforePeriod[logsBeforePeriod.length - 1].km;
+        } else if (sortedLogs.length > 0) {
+            // No logs before period, use the very first log as baseline
+            startKm = sortedLogs[0].km;
         }
         
         return Math.max(0, lastLog.km - startKm);
@@ -207,6 +211,7 @@ const App = () => {
       projectedBalance,
       currentExcessCost,
       quotas: {
+        day: { target: dailyTarget, actual: getActualForPeriod(1) },
         week: { target: dailyTarget * 7, actual: getActualForPeriod(7) },
         month: { target: dailyTarget * 30.44, actual: getActualForPeriod(30) },
         year: { target: settings.annualKm, actual: getActualForPeriod(365) }
@@ -231,6 +236,7 @@ const App = () => {
     if (chartRange !== 'all') {
       let rangeStart: Date;
       switch (chartRange) {
+        case 'day': rangeStart = startOfDay(now); break;
         case 'week': rangeStart = subDays(now, 7); break;
         case 'month': rangeStart = subMonths(now, 1); break;
         case '3months': rangeStart = subMonths(now, 3); break;
@@ -397,7 +403,8 @@ const App = () => {
             </div>
 
             {/* Quota breakdown */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <QuotaCard label="Daily" target={metrics.quotas.day.target} actual={metrics.quotas.day.actual} />
               <QuotaCard label="Weekly" target={metrics.quotas.week.target} actual={metrics.quotas.week.actual} />
               <QuotaCard label="Monthly" target={metrics.quotas.month.target} actual={metrics.quotas.month.actual} />
               <QuotaCard label="Yearly" target={metrics.quotas.year.target} actual={metrics.quotas.year.actual} />
@@ -414,6 +421,7 @@ const App = () => {
                   <RangeButton active={chartRange === '3months'} onClick={() => setChartRange('3months')} label="3M" />
                   <RangeButton active={chartRange === 'month'} onClick={() => setChartRange('month')} label="1M" />
                   <RangeButton active={chartRange === 'week'} onClick={() => setChartRange('week')} label="1W" />
+                  <RangeButton active={chartRange === 'day'} onClick={() => setChartRange('day')} label="1D" />
                 </div>
               </div>
               <div className="h-[300px]">
